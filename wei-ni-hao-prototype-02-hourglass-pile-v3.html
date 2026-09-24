@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>為你好｜Pixel Hourglass v3</title>
+<style>
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#f7f3ea}
+body{touch-action:none}
+canvas{position:fixed;inset:0;width:100vw;height:100vh;display:block;image-rendering:pixelated}
+#permission{
+ position:fixed;left:50%;bottom:24px;transform:translateX(-50%);
+ z-index:10;padding:12px 16px;border:2px solid #171717;background:#f7f3ea;
+ color:#171717;font:700 13px/1.2 monospace
+}
+#hint{
+ position:fixed;left:50%;top:14px;transform:translateX(-50%);z-index:9;
+ font:10px monospace;color:#171717;opacity:.5;white-space:nowrap
+}
+</style>
+</head>
+<body>
+<canvas id="screen"></canvas>
+<div id="hint">ROTATE 180° · THE CONTENT FOLLOWS GRAVITY</div>
+<button id="permission">啟用手機陀螺儀</button>
+
+<script>
+(function(){
+'use strict';
+
+const canvas=document.getElementById('screen');
+const ctx=canvas.getContext('2d');
+const button=document.getElementById('permission');
+let W=0,H=0,DPR=1;
+
+const harsh='我們做這麼多都是為了你';
+const care='因為對我來說你很重要';
+
+let progress=0;
+let target=0;
+let zeroBeta=null;
+let sensorReady=false;
+
+/*
+  核心概念：
+  0°  = 內容全部堆在螢幕下端
+  90° = 內容通過中間「瓶頸」
+  180°= 內容全部堆在螢幕上端
+
+  每一個愛心、每一個字的位置都有固定 seed。
+  沒有每幀亂數，所以看似隨機，其實每一度都可重現。
+*/
+
+function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
+function lerp(a,b,t){return a+(b-a)*t;}
+function smooth(t){return t*t*(3-2*t);}
+function easeInOut(t){
+  t=clamp(t,0,1);
+  return t<.5 ? 4*t*t*t : 1-Math.pow(-2*t+2,3)/2;
+}
+function resize(){
+  DPR=Math.min(window.devicePixelRatio||1,2);
+  W=innerWidth; H=innerHeight;
+  canvas.width=Math.max(1,Math.round(W*DPR));
+  canvas.height=Math.max(1,Math.round(H*DPR));
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+}
+addEventListener('resize',resize);
+resize();
+
+/* 固定的「內容物」資料 */
+const hearts=[
+ // x, y, size, angle, phase
+ [.09,.00,18,-12,.07], [.18,.00,13, 18,.23], [.28,.00,24,-7,.41],
+ [.40,.00,12, 23,.58], [.51,.00,20,-16,.72], [.63,.00,15, 11,.84],
+ [.74,.00,25,-21,.16], [.86,.00,14, 16,.36], [.95,.00,20,-8,.63],
+ [.05,.00,12, 27,.91], [.34,.00,17, -4,.29], [.58,.00,13, 19,.49],
+ [.80,.00,18,-14,.77], [.14,.00,21,  8,.54], [.90,.00,11,-25,.12]
+];
+
+/* 像素愛心：真正用格子組成 */
+function heartShape(){
+  return [
+    [0,1,0,1,0],
+    [1,1,1,1,1],
+    [1,1,1,1,1],
+    [0,1,1,1,0],
+    [0,0,1,0,0]
+  ];
+}
+function drawHeart(x,y,size,angle,alpha,fill='#171717'){
+  const shape=heartShape();
+  const u=Math.max(3,Math.round(size/5));
+  const gap=Math.max(1,Math.round(u*.10)); // 讓每一格清楚可見
+  ctx.save();
+  ctx.translate(Math.round(x),Math.round(y));
+  ctx.rotate(angle*Math.PI/180);
+  ctx.globalAlpha=alpha;
+  ctx.fillStyle=fill;
+  for(let r=0;r<shape.length;r++){
+    for(let c=0;c<shape[r].length;c++){
+      if(shape[r][c]){
+        const xx=(c-2)*u+gap/2;
+        const yy=(r-2)*u+gap/2;
+        ctx.fillRect(Math.round(xx),Math.round(yy),Math.max(1,u-gap),Math.max(1,u-gap));
+      }
+    }
+  }
+  ctx.restore();
+}
+
+/* 用固定座標建立「下方堆積」與「上方堆積」 */
+function pilePosition(i,top=false){
+  const h=hearts[i];
+  const x=h[0]*W;
+  const phase=h[4];
+
+  // 螢幕下端的堆積高度：越靠中間越高，外側較低
+  const nx=h[0];
+  const mound=Math.max(0,1-Math.abs(nx-.5)*1.75);
+  const row=(i%5)*0.055 + phase*0.10;
+  const yBottom=H - (28 + mound*H*.22 + row*H*.08 + (i%3)*7);
+
+  // 上端是完全鏡像的堆積
+  const yTop=28 + mound*H*.22 + row*H*.08 + (i%3)*7;
+
+  return {x:x,y:top?yTop:yBottom};
+}
+
+/* 中間瓶頸：內容物通過畫面中央 */
+function streamPosition(i,p){
+  const h=hearts[i];
+  const bottom=pilePosition(i,false);
+  const top=pilePosition(i,true);
+
+  // 讓每顆內容物有不同通過時間，但完全由固定 phase 決定
+  const delay=h[4]*0.12;
+  const pp=clamp((p-delay)/(1-delay),0,1);
+
+  // 三段式：
+  // 0~0.42：從下方堆積向中央
+  // 0.42~0.58：集中在中央瓶頸
+  // 0.58~1：從中央散到上方堆積
+  let x,y,ang;
+
+  if(pp<.42){
+    const t=easeInOut(pp/.42);
+    // 越接近中央，越窄
+    const spread=lerp(1,.12,t);
+    x=lerp(bottom.x,W/2 + (bottom.x-W/2)*spread,t);
+    y=lerp(bottom.y,H*.50 + (h[4]-.5)*H*.10,t);
+    ang=lerp(h[3],h[3]*.25,t);
+  }else if(pp<.58){
+    const t=smooth((pp-.42)/.16);
+    const neckX=W/2 + (h[4]-.5)*W*.12;
+    x=lerp(W/2 + (h[4]-.5)*W*.10,neckX,t);
+    y=H*.50 + (h[4]-.5)*H*.12;
+    ang=h[3]*.15;
+  }else{
+    const t=easeInOut((pp-.58)/.42);
+    const spread=lerp(.12,1,t);
+    x=lerp(W/2 + (h[4]-.5)*W*.10,top.x,t);
+    y=lerp(H*.50 + (h[4]-.5)*H*.12,top.y,t);
+    ang=lerp(h[3]*.15,h[3],t);
+  }
+  return {x,y,ang};
+}
+
+/* 像素化文字：先低解析繪製，再 nearest-neighbor 放大 */
+function textSprite(text,size,maxWidth){
+  const scale=3;
+  const c=document.createElement('canvas');
+  const g=c.getContext('2d');
+  const fs=Math.max(10,Math.round(size/scale));
+  g.font='900 '+fs+'px "Noto Sans TC","PingFang TC",sans-serif';
+  const measured=g.measureText(text).width;
+  const width=Math.min(maxWidth/scale,measured+8);
+  c.width=Math.ceil(width);
+  c.height=Math.ceil(fs*1.25);
+  g.font='900 '+fs+'px "Noto Sans TC","PingFang TC",sans-serif';
+  g.textAlign='center';
+  g.textBaseline='middle';
+  g.fillStyle='#171717';
+  g.fillText(text,c.width/2,c.height/2);
+  return {c,scale,w:c.width*scale,h:c.height*scale};
+}
+
+let harshSprite,careSprite;
+function makeSprites(){
+  // 分成兩行，讓文字可以像「內容物」一樣堆在一起
+  harshSprite=[
+    textSprite('我們做這麼多',Math.min(62,W*.085),W*.78),
+    textSprite('都是為了你',Math.min(62,W*.085),W*.78)
+  ];
+  careSprite=[
+    textSprite('因為對我來說',Math.min(62,W*.085),W*.78),
+    textSprite('你很重要',Math.min(62,W*.085),W*.78)
+  ];
+}
+makeSprites();
+addEventListener('resize',makeSprites);
+
+/*
+  文字也是內容物。
+  每一行都有固定的偏移、角度與「堆積位置」。
+*/
+const textParts=[
+ {key:0,dx:-.06,dy:0,angle:-7},
+ {key:1,dx:.07,dy:-.01,angle:5}
+];
+
+function drawTextGroup(sprites,p,visible,alpha,flipBias){
+  // 文字和愛心一樣，從同一端一路移到另一端。
+  // 不在 90° 瞬間跳位置，而是每一度都沿著「沙漏通道」移動。
+  const baseY=lerp(H*.84,H*.16,p);
+  const centerX=W*.5;
+  for(let i=0;i<sprites.length;i++){
+    const s=sprites[i];
+    const part=textParts[i];
+    const pileOffsetY=(i===0?-0.035:0.045)*H;
+    const x=centerX+part.dx*W;
+    const y=baseY+pileOffsetY;
+    const ang=part.angle*(flipBias?-.55:.55);
+
+    ctx.save();
+    ctx.translate(x,y);
+    ctx.rotate(ang*Math.PI/180);
+    ctx.globalAlpha=alpha*visible;
+    ctx.imageSmoothingEnabled=false;
+    ctx.drawImage(s.c,-s.w/2,-s.h/2,s.w,s.h);
+    ctx.restore();
+  }
+}
+
+function drawTextPile(p,alpha){
+  // 0°：刺耳原句清楚
+  // 90°：兩句都經過中間、短暫交疊
+  // 180°：關心原意清楚
+  const cross=smooth(clamp((p-.38)/.24,0,1));
+  const harshVisible=1-cross;
+  const careVisible=cross;
+
+  drawTextGroup(harshSprite,p,harshVisible,alpha,false);
+  drawTextGroup(careSprite,p,careVisible,alpha,true);
+
+  // 90° 附近讓兩句產生極輕微的像素重疊感
+  if(p>.40 && p<.60){
+    const a=1-Math.abs(p-.5)/.10;
+    ctx.save();
+    ctx.globalAlpha=a*.10;
+    drawTextGroup(harshSprite,p,1,alpha,false);
+    drawTextGroup(careSprite,p,1,alpha,true);
+    ctx.restore();
+  }
+}
+
+/* 在內容堆積區加入固定的小碎片，讓邊緣像真正的「堆積物」 */
+const crumbs=[
+ [.03,.02,7,-20], [.11,.04,5,14], [.21,.08,8,-7], [.31,.03,5,21],
+ [.44,.07,7,-13], [.56,.04,6,9], [.68,.09,5,-18], [.77,.04,8,17],
+ [.89,.08,6,-5], [.97,.03,7,22],
+ [.06,.13,5,8], [.27,.15,6,-19], [.73,.14,5,11], [.93,.15,6,-12]
+];
+function drawCrumbs(p,alpha){
+  const top=p>=.5;
+  const t=top?(p-.5)*2:(1-p*2);
+  const pileY=top?H*.10:H*.90;
+  ctx.fillStyle='#171717';
+  ctx.globalAlpha=alpha;
+  crumbs.forEach((q,i)=>{
+    const side=top?-1:1;
+    const x=q[0]*W;
+    const y=pileY + side*(q[1]*H);
+    const s=q[2];
+    ctx.save();
+    ctx.translate(x,y);
+    ctx.rotate(q[3]*Math.PI/180);
+    ctx.fillRect(-s/2,-s/2,s,s);
+    ctx.restore();
+  });
+  ctx.globalAlpha=1;
+}
+
+/* 主畫面 */
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle='#f7f3ea';
+  ctx.fillRect(0,0,W,H);
+
+  const p=progress;
+
+  // 非常淡的中心「通道」，不是畫沙漏，只是讓內容物經過的區域
+  // 不畫任何輪廓，保持「整個螢幕就是沙漏」。
+
+  // 愛心：全部從一端堆積 → 中間 → 另一端堆積
+  for(let i=0;i<hearts.length;i++){
+    const pos=streamPosition(i,p);
+    const alpha=1;
+    const size=hearts[i][2]*(.82 + .18*Math.sin(i*2.3));
+    drawHeart(pos.x,pos.y,size,pos.ang,alpha);
+  }
+
+  // 文字也一起位移，而不是固定在畫面中央
+  drawTextPile(p,1);
+
+  // 在 90° 附近增加少量內容碎片，形成「流過瓶頸」的感覺
+  const neckStrength=1-Math.min(1,Math.abs(p-.5)/.22);
+  if(neckStrength>0){
+    for(let i=0;i<12;i++){
+      const x=W/2 + (Math.sin(i*19.17)*.5)*W*.11;
+      const y=H/2 + (i-6)*H*.035;
+      const s=4+(i%3)*2;
+      drawHeart(x,y,s,(i*31)%40-20,neckStrength*.8);
+    }
+  }
+
+  drawCrumbs(p,1);
+
+  requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+
+/* ===== 手機陀螺儀 ===== */
+function updateFromBeta(beta){
+  if(zeroBeta===null) zeroBeta=beta;
+
+  // 以「第一次拿手機的角度」作為 0°。
+  // delta 會被限制在 -180~180，因此翻轉與翻回都能即時反向。
+  let d=beta-zeroBeta;
+  while(d>180)d-=360;
+  while(d<-180)d+=360;
+
+  // 0°→180°，方向保留。
+  // 若使用者往另一側翻，則反向。
+  target=clamp(Math.abs(d)/180,0,1);
+
+  // 顯示層不依賴固定動畫時間；每一度都直接對應畫面狀態。
+}
+
+function handleOrientation(e){
+  if(typeof e.beta!=='number') return;
+  sensorReady=true;
+  updateFromBeta(e.beta);
+  button.textContent='陀螺儀已啟用';
+  button.style.opacity='.45';
+}
+
+async function enableSensor(){
+  try{
+    if(typeof DeviceOrientationEvent!=='undefined' &&
+       typeof DeviceOrientationEvent.requestPermission==='function'){
+      const permission=await DeviceOrientationEvent.requestPermission();
+      if(permission!=='granted'){
+        button.textContent='尚未取得陀螺儀權限';
+        return;
+      }
+    }
+    addEventListener('deviceorientation',handleOrientation,true);
+    button.textContent='請翻轉手機測試';
+    // 兩秒後淡出按鈕，但仍可點擊重新校正
+    setTimeout(()=>{button.style.opacity='.35';},900);
+  }catch(err){
+    button.textContent='請允許 Safari 使用動作感測器';
+  }
+}
+button.addEventListener('click',()=>{
+  zeroBeta=null;
+  target=0;
+  progress=0;
+  enableSensor();
+});
+
+/* ===== 桌機／沒有陀螺儀時：拖曳測試 ===== */
+let dragging=false;
+addEventListener('pointerdown',e=>{
+  if(e.target===button)return;
+  dragging=true;
+});
+addEventListener('pointermove',e=>{
+  if(!dragging || sensorReady)return;
+  target=clamp(1-e.clientY/H,0,1);
+});
+addEventListener('pointerup',()=>dragging=false);
+addEventListener('pointercancel',()=>dragging=false);
+
+/* 平滑只用來避免畫面抖動，但不改變「角度決定狀態」的原則 */
+setInterval(()=>{
+  progress += (target-progress)*.22;
+},16);
+
+})();
+</script>
+</body>
+</html>
