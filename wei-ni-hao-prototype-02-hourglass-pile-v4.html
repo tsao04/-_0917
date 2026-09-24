@@ -1,0 +1,23 @@
+<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>為你好｜Pixel Hourglass v4</title><style>*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#000;touch-action:none}canvas{display:block;width:100vw;height:100vh;image-rendering:pixelated}#start{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:5;background:#000;color:#fff;border:1px solid #777;padding:11px 16px;font-size:14px}#hint{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:4;color:#aaa;font:11px sans-serif;letter-spacing:1px;white-space:nowrap}</style></head><body><canvas id="c"></canvas><button id="start">啟動陀螺儀</button><div id="hint">翻轉手機・內容物會一起流向另一端</div><script>
+const c=document.getElementById('c'),x=c.getContext('2d'),btn=document.getElementById('start'),hint=document.getElementById('hint');x.imageSmoothingEnabled=false;let W,H,S,p=0,target=0,zero=null;
+const A=['我們','做這麼多','都是','為了你'],B=['因為','對我來說','你','很重要'];
+const heart=[['01100110','11111111','11111111','01111110','00111100','00011000']];
+const Hs=[];for(let i=0;i<72;i++){let col=i%9,row=Math.floor(i/9);Hs.push({u:(col-4)/4.5+(row%2)*.035,v:row/8,s:4+(i*7)%15,a:-25+(i*31)%51,endU:(col-4)/4.7+(row%3-.9)*.045,endV:1-row/10});}
+const textPos=[[-.34,.10,22,-18],[.12,.28,25,9],[.32,.53,20,-14],[-.12,.73,24,7]];
+function resize(){let d=Math.min(devicePixelRatio||1,2);W=innerWidth*d;H=innerHeight*d;c.width=W;c.height=H;S=Math.min(W/390,H/844)}addEventListener('resize',resize);resize();
+function clamp(v){return Math.max(0,Math.min(1,v))}function ease(t){return t*t*(3-2*t)}
+function heartDraw(px,py,size,ang,col,alpha=1){x.save();x.translate(px,py);x.rotate(ang*Math.PI/180);x.globalAlpha=alpha;x.fillStyle=col;let z=Math.max(2,Math.round(size/8));heart[0].forEach((r,iy)=>[...r].forEach((q,ix)=>{if(q==='1')x.fillRect((ix-4)*z,(iy-3)*z,z-.35,z-.35)}));x.restore()}
+function pixelText(t,px,py,size,ang,alpha){x.save();x.translate(px,py);x.rotate(ang*Math.PI/180);x.globalAlpha=alpha;let o=document.createElement('canvas'),z=Math.max(1,Math.floor(size/10)),w=Math.ceil([...t].length*size*.9/z);o.width=w;o.height=Math.ceil(size*1.3/z);let q=o.getContext('2d');q.imageSmoothingEnabled=false;q.fillStyle='#fff';q.font=`bold ${Math.max(7,Math.floor(size/z))}px sans-serif`;q.textBaseline='middle';q.fillText(t,1,o.height/2);x.drawImage(o,-w*z/2,-size*.65,w*z,size*1.3);x.restore()}
+function draw(){x.fillStyle='#000';x.fillRect(0,0,W,H);let q=ease(p),bottom=H*.88,top=H*.12;
+ // 所有內容物都只做「垂直搬移」：不向中央收成一條線
+ Hs.forEach((h,i)=>{let sx=W*(.5+h.u*.72), ex=W*(.5+h.endU*.72), sy=bottom-h.v*H*.38, ey=top+h.endV*H*.38;let yy=sy*(1-q)+ey*q,xx=sx*(1-q)+ex*q;let col=i%7===0?'#fff':i%4===0?'#ff6870':'#e8323d';heartDraw(xx,yy,(h.s*S),h.a+(q-.5)*18,col,.96)});
+ // 小像素碎片增加密度
+ for(let i=0;i<220;i++){let u=((i*47)%101)/100-.5,v=((i*73)%97)/97;let sx=W*(.5+u*.9),sy=bottom-v*H*.42,ex=W*(.5+u*.92),ey=top+(1-v)*H*.42;let xx=sx*(1-q)+ex*q,yy=sy*(1-q)+ey*q;x.fillStyle=i%9?'#d93640':'#fff';x.globalAlpha=.25+(i%5)*.12;let z=(1+i%3)*S;x.fillRect(xx,yy,z,z)}x.globalAlpha=1;
+ // 文字像內容物一樣分散在愛心裡，不固定兩行
+ let layouts=q<.5?A:B;layouts.forEach((t,i)=>{let L=textPos[i],sx=W*(.5+L[0]*.75),ex=W*(.5+L[0]*.75+(i%2?.02:-.02)),sy=bottom-L[1]*H*.38,ey=top+(1-L[1])*H*.38;pixelText(t,sx*(1-q)+ex*q,sy*(1-q)+ey*q,L[2]*S,L[3]+(q-.5)*(i%2?14:-12),.94)});
+ // 交界短暫混合語意
+ if(q>.42&&q<.58){let r=(q-.42)/.16;A.forEach((t,i)=>{let L=textPos[i];pixelText(t,W*(.5+L[0]*.75),bottom-L[1]*H*.38,L[2]*S,L[3],.28*(1-r))});B.forEach((t,i)=>{let L=textPos[i];pixelText(t,W*(.5+L[0]*.75),top+(1-L[1])*H*.38,L[2]*S,L[3],.28*r)})}requestAnimationFrame(draw)}
+let drag=false,sy=0,sp=0;addEventListener('pointerdown',e=>{drag=true;sy=e.clientY;sp=target});addEventListener('pointermove',e=>{if(drag)target=clamp(sp+(sy-e.clientY)/innerHeight)});addEventListener('pointerup',()=>drag=false);addEventListener('pointercancel',()=>drag=false);
+btn.onclick=async()=>{try{if(typeof DeviceOrientationEvent!=='undefined'&&typeof DeviceOrientationEvent.requestPermission==='function'){if(await DeviceOrientationEvent.requestPermission()!=='granted')return}addEventListener('deviceorientation',e=>{if(typeof e.beta!=='number')return;if(zero===null)zero=e.beta;let d=e.beta-zero;while(d>180)d-=360;while(d<-180)d+=360;target=clamp(Math.abs(d)/180)},true);btn.style.display='none';hint.textContent='翻轉 180°・全部內容物完整倒向另一端'}catch(e){hint.textContent='請允許陀螺儀；也可拖曳畫面測試'}};
+(function loop(){p+=(target-p)*.12;requestAnimationFrame(loop)})();draw();
+</script></body></html>
